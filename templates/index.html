@@ -1,90 +1,74 @@
-
-<!DOCTYPE html>
-<html>
+<!doctype html>
+<html lang="en">
 <head>
-    <title>PartyPlnr AI</title>
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Anton&display=swap');
+  <meta charset="utf-8">
+  <title>PartyPlnr Vendor Finder</title>
 
-        body {
-            font-family: Arial, sans-serif;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            height: 100vh;
-            margin: 0;
-            text-align: center;
-        }
+  <!-- Fonts -->
+  <link href="https://fonts.googleapis.com/css2?family=Anton:wght@400&display=swap" rel="stylesheet">
 
-        h1 {
-            font-family: 'Anton', sans-serif;
-            font-size: 3em;
-            margin-bottom: 20px;
-        }
-
-        #chat-box {
-            width: 100%;
-            max-width: 600px;
-            margin: 20px auto;
-            text-align: left;
-            font-size: 1.1em;
-        }
-
-        #chat-box p {
-            margin: 8px 0;
-        }
-
-        input[type="text"] {
-            width: 70%;
-            padding: 10px;
-            font-size: 16px;
-        }
-
-        button {
-            padding: 10px 15px;
-            font-size: 16px;
-            cursor: pointer;
-        }
-
-        #loading {
-            display: none;
-            font-size: 14px;
-            color: gray;
-        }
-    </style>
+  <style>
+    body{
+      font-family: Arial, sans-serif;
+      display:flex; flex-direction:column;
+      justify-content:center; align-items:center;
+      height:100vh; margin:0; background:#f7f7f7;
+    }
+    h1{font-family:'Anton',sans-serif; margin-bottom:10px;}
+    #chat-box{
+      width:90%; max-width:640px; height:60vh;
+      border:1px solid #ccc; padding:10px;
+      overflow-y:auto; background:#fff;
+    }
+    .user{ text-align:right; font-weight:bold; margin:4px 0;}
+    .bot { text-align:left;  margin:4px 0;}
+    #loader{display:none; margin:8px; color:#666;}
+    #controls{width:90%; max-width:640px; display:flex; margin-top:8px;}
+    #message{flex:1; padding:10px;}
+    #send{padding:10px 20px; font-weight:bold;}
+  </style>
 </head>
 <body>
-    <h1>🎉 Ask PartyPlnr AI</h1>
-    <div id="chat-box"></div>
-    <input type="text" id="user-input" placeholder="I need a DJ in Dallas..." />
-    <button onclick="sendMessage()">Find a VNDR</button>
-    <div id="loading">Searching...</div>
+  <h1>PartyPlnr Vendor Finder</h1>
 
-    <script>
-        async function sendMessage() {
-            const input = document.getElementById('user-input');
-            const chatBox = document.getElementById('chat-box');
-            const loading = document.getElementById('loading');
-            const message = input.value.trim();
+  <div id="chat-box"></div>
+  <div id="loader">Searching…</div>
 
-            if (!message) return;
+  <div id="controls">
+    <input id="message" placeholder="e.g. 'Need a photographer in Alvin'" autocomplete="off">
+    <button id="send">Find&nbsp;a&nbsp;VNDR</button>
+  </div>
 
-            chatBox.innerHTML += `<p><strong>You:</strong> ${message}</p>`;
-            input.value = '';
-            loading.style.display = 'block';
+  <script>
+    const chat   = document.getElementById('chat-box');
+    const loader = document.getElementById('loader');
 
-            const res = await fetch('/chat', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ user_input: message })
-            });
+    function addLine(text, cls){
+      const p=document.createElement('p');
+      p.className=cls; p.innerText=text;
+      chat.appendChild(p); chat.scrollTop=chat.scrollHeight;
+    }
 
-            const data = await res.json();
-            loading.style.display = 'none';
-            chatBox.innerHTML += `<p><strong>PartyPlnr:</strong> ${data.response}</p>`;
-            chatBox.scrollTop = chatBox.scrollHeight;
-        }
-    </script>
+    async function send(){
+      const msg = document.getElementById('message').value.trim();
+      if(!msg) return;
+      addLine(msg,'user');
+      document.getElementById('message').value='';
+      loader.style.display='block';
+
+      const res = await fetch('/chat',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({message:msg})
+      });
+      const data = await res.json();
+
+      loader.style.display='none';
+      addLine(data.response,'bot');
+    }
+
+    document.getElementById('send').onclick = send;
+    document.getElementById('message').addEventListener('keyup', e => { if(e.key==='Enter') send(); });
+  </script>
 </body>
 </html>
