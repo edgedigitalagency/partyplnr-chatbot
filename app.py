@@ -1,128 +1,114 @@
-import os, re, random
+# ──────────────────────────────────────────────────────────────────────────────
+# PartyPlnr – zero-cost, CSV-only chatbot (no OpenAI key needed)
+# Copy this file to your project root and deploy.  Flask serves /  and /chat
+# ──────────────────────────────────────────────────────────────────────────────
+import os, random, re
 from difflib import SequenceMatcher
+
 import pandas as pd
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, session
 
-# ──────────────────────────────────────────────────────────────────────────────
-#  Config & data
-# ──────────────────────────────────────────────────────────────────────────────
-CSV_PATH = os.getenv("VENDORS_CSV_PATH", "VNDRs.csv")
-df = pd.read_csv(CSV_PATH).fillna("")            # load once
+# ── config ────────────────────────────────────────────────────────────────────
+CSV_PATH       = os.getenv("VENDORS_CSV_PATH", "VNDRs.csv")
+PORT           = int(os.getenv("PORT", 10000))
+app            = Flask(__name__, template_folder="templates", static_folder="static")
+app.secret_key = os.getenv("FLASK_SECRET", "change-me-in-prod")  # needed for session
 
-#  lowercase helper columns for fast matching
-df["title_lc"]      = df["Title"].str.lower()
-df["category_lc"]   = df["Category"].str.lower()
-df["metro_lc"]      = df["Metro"].str.lower()
-df["parties_lc"]    = df["PartyTypes"].str.lower()
-df["vibes_lc"]      = df["Vibes"].str.lower()
+# ── load vendor DB once at startup ────────────────────────────────────────────
+df = pd.read_csv(CSV_PATH).fillna("")
+df_cols = {c.lower(): c for c in df.columns}  # map for safe access
 
-# response templates (rotates for variety)
-TEMPLATES_ONE = [
-    "🎉 Sweet! Planning a {party} in {city}? Check this out:\n\n{vendor}",
-    "✨ Gotcha — here’s a {category} near {city} you might love:\n\n{vendor}",
-    "🙌 Perfect match! Consider:\n\n{vendor}",
+# ── helpers ───────────────────────────────────────────────────────────────────
+EMOJIS  = ["🎉", "🥳", "🎈", "✨", "📸", "🍰", "💐"]
+GREET   = [
+    "Here’s a perfect match {e}",
+    "You might love these {e}",
+    "Great pick!  Check these out {e}",
+    "Party on!  Try one of these {e}",
 ]
-TEMPLATES_MULTI = [
-    "Here are a few ideas for your {party} in {city}:\n\n{vendors}",
-    "I found some great options:\n\n{vendors}",
-    "Try these 🎈👇\n\n{vendors}",
-]
-NO_MATCH = (
-    "😕 I couldn’t find anything in the list for that. "
-    "Maybe try another keyword (photography, balloons, venue…) or name a nearby city."
-)
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-#  Helpers
-# ──────────────────────────────────────────────────────────────────────────────
 def _similar(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
+def _tokens(text: str) -> list[str]:
+    return re.findall(r"[A-Za-z']+", text.lower())
 
-def _format_vendor(row: pd.Series) -> str:
-    return (
-        f"**{row['Title']}**\n"
-        f"Category : {row['Category']}\n"
-        f"Offers   : {row['Offers']}\n"
-        f"Location : {row['Location']}\n"
-        f"Contact  : {row.get('Contact Info','') or row.get('Phone Number','')}\n"
-        f"Link     : {row.get('link ','')}"
-    )
+def _fmt(row: pd.Series) -> str:
+    """Pretty-print a single vendor row."""
+    parts = [
+        f"**{row.get('Title','(No name)')}**",
+        f"Category : {row.get('Category','')}",
+        f"Offers   : {row.get('Offers','')}",
+        f"Location : {row.get('Location','')}",
+        f"Contact  : {row.get('Contact Info','') or row.get('Phone Number','')}",
+        f"Link     : {row.get('link ','')}",
+    ]
+    return "\n".join(p for p in parts if p.strip())
 
+def _best_city_hint() -> str | None:
+    """Return city stored in session if we already asked user once."""
+    return session.get("city")
 
-def _score_row(row: pd.Series, msg_tokens: list[str], city: str, party: str) -> float:
-    """Simple weighted score: category/title + city + party type + fuzzy."""
-    score = 0.0
-    for token in msg_tokens:
-        if token in row["title_lc"] or token in row["category_lc"]:
-            score += 2
-        if token in row["parties_lc"]:
-            score += 1.5
-        if token in row["vibes_lc"]:
-            score += 0.5
-        # fuzzy wiggle room
-        score += max(
-            _similar(token, row["title_lc"]),
-            _similar(token, row["category_lc"]),
-            _similar(token, row["parties_lc"]),
-        )
+def _save_city(city: str) -> None:
+    session["city"] = city.strip()
 
-    # city / metro bonus
-    if city and city in row["metro_lc"]:
-        score += 2
-    return score
+def local_lookup(message: str, city_hint: str | None = None) -> list[pd.Series]:
+    """
+    Return up to three best-fit vendor rows.
+    • Match on Category or semicolon-separated 'Keywords'
+    • Prefer rows whose Metro column contains the user’s city hint.
+    """
+    toks   = _tokens(message)
+    wants  = set(toks)
+    hits:   list[tuple[int, pd.Series]] = []
 
+    for _, row in df.iterrows():
+        cat   = str(row.get("Category", "")).lower()
+        keys  = str(row.get("Keywords", "")).lower().split(";")
+        metro = str(row.get("Metro", "")).lower()
 
-def find_matches(message: str, top_k: int = 3):
-    msg_lc = message.lower()
-    tokens  = re.findall(r"[a-z']+", msg_lc)
+        cat_hit  = any(tok in cat for tok in wants)
+        key_hit  = any(_similar(tok, kw.strip()) >= 0.76 for tok in wants for kw in keys)
 
-    # naive city & party‐type guess (first match wins)
-    known_cities = set(df["metro_lc"]) - {""}
-    city   = next((c for c in known_cities if c in msg_lc), "")
-    party  = next((p for p in [
-        "baby shower","bridal shower","wedding","birthday","kids party",
-        "retirement","corporate","festival","anniversary"
-    ] if p in msg_lc), "event")
+        if not (cat_hit or key_hit):
+            continue
 
-    # score every vendor
-    scores = df.apply(lambda row: _score_row(row, tokens, city, party), axis=1)
-    top    = df.iloc[scores.nlargest(top_k).index]
-    top    = top[scores.nlargest(top_k) > 2]          # threshold to ignore weak hits
-    return city.title() or "your area", party, top
+        loc_score = 0 if (city_hint and city_hint.lower() in metro) else 1
+        hits.append((loc_score, row))
 
+    hits.sort(key=lambda x: x[0])
+    return [row for _, row in hits[:3]]
 
-# ──────────────────────────────────────────────────────────────────────────────
-#  Flask
-# ──────────────────────────────────────────────────────────────────────────────
-app = Flask(__name__, template_folder="templates", static_folder="static")
-
-
+# ── routes ────────────────────────────────────────────────────────────────────
 @app.route("/")
 def home():
-    return render_template("index.html")
-
+    return render_template("index.html")        # keep your existing HTML
 
 @app.route("/chat", methods=["POST"])
-def chat():
-    user_msg = request.get_json(force=True).get("message", "")
-    city, party, matches = find_matches(user_msg)
+def chat() -> str:
+    user = request.get_json(force=True).get("message", "").strip()
+    if not user:
+        return jsonify({"response": "Say something and I’ll try to help 😊"})
 
-    if matches.empty:
-        reply = NO_MATCH
-    elif len(matches) == 1:
-        vendor = _format_vendor(matches.iloc[0])
-        reply  = random.choice(TEMPLATES_ONE).format(
-            party=party, city=city, category=matches.iloc[0]["Category"].lower(), vendor=vendor
-        )
-    else:
-        vendors = "\n\n---\n\n".join(_format_vendor(r) for _, r in matches.iterrows())
-        reply   = random.choice(TEMPLATES_MULTI).format(party=party, city=city, vendors=vendors)
+    # simple “remember city” logic
+    if user.lower().startswith(("i am in ", "i'm in ", "my city is ")):
+        _save_city(user.split()[-1])
+        return jsonify({"response": "Got it!  I’ll look near **{}**.".format(_best_city_hint())})
 
+    city_hint = _best_city_hint()
+    hits      = local_lookup(user, city_hint)
+
+    if not hits:
+        # if we don’t know the city yet, ask once
+        if not city_hint:
+            return jsonify({"response": "Sure — what city will the event be in?"})
+        return jsonify({"response": "I don’t have anyone for that yet — try another keyword 🤔"})
+
+    greeting = random.choice(GREET).format(e=random.choice(EMOJIS))
+    body     = "\n\n---\n\n".join(_fmt(r) for r in hits)
+    reply    = f"{greeting}\n\n{body}"
     return jsonify({"response": reply})
 
-
-# Local dev
+# ── local run ─────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000, debug=True)
+    app.run(host="0.0.0.0", port=PORT, debug=True)
