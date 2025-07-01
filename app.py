@@ -68,3 +68,45 @@ def chat():
 if __name__ == "__main__":
     # local dev → python app.py
     app.run(host="0.0.0.0", port=10000, debug=True)
+
+import re
+from difflib import SequenceMatcher
+
+def similar(a, b):               # quick similarity score 0-1
+    return SequenceMatcher(None, a, b).ratio()
+
+def local_lookup(message: str) -> str | None:
+    msg = message.lower()
+
+    for _, row in df.iterrows():
+        title    = str(row.get("Title",    "")).lower()
+        category = str(row.get("Category", "")).lower()
+
+        # direct substring match
+        if title and title in msg or category and category in msg:
+            return _format_vendor(row)
+
+        # fuzzy match ≥ 0.7 (“photographer” ≈ “photography”)
+        for word in re.findall(r"\w+", msg):
+            if similar(word, category) >= 0.7 or similar(word, title) >= 0.7:
+                return _format_vendor(row)
+    return None
+
+def ai_fallback(message: str) -> str:
+    if not openai.api_key:
+        return ("I couldn't reach the AI right now. "
+                "Please try a different keyword (e.g. 'photography', "
+                "'mobile bar', 'venue', etc.).")
+
+    try:
+        completion = openai.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user",   "content": message}
+            ],
+            max_tokens=200,
+        )
+        return completion.choices[0].message.content.strip()
+    except openai.AuthenticationError:
+        return "The AI service isn’t configured yet."
