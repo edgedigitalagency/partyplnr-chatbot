@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>PartyPlnr AI</title>
+</head>
+<body>
+    <h2>🎉 Ask PartyPlnr AI</h2>
+    <div id="chatbox"></div>
+    <input type="text" id="user-input" placeholder="Type your question..." />
+    <button onclick="sendMessage()">Send</button>
+
+    <script>
+        async function sendMessage() {
+            const input = document.getElementById("user-input").value;
+            const res = await fetch("/api/chat", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({ message: input })
+            });
+            const data = await res.json();
+            const box = document.getElementById("chatbox");
+            box.innerHTML += "<p><strong>You:</strong> " + input + "</p>";
+            box.innerHTML += "<p><strong>PartyPlnr:</strong> " + data.reply + "</p>";
+        }
+    </script>
+</body>
+</html>
