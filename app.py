@@ -11,7 +11,7 @@ from collections import defaultdict
 from pathlib import Path
 
 # ── Config ──────────────────────────────────────────────────────────────────
-CSV_PATH   = os.getenv("VENDORS_CSV_PATH", "VNDRs_full_with_tags.csv")
+CSV_PATH   = os.getenv("VENDORS_CSV_PATH", "VNDRs.csv")
 CACHE_TTL  = 120                       # seconds (simple in-memory cache)
 TOP_K      = 3                         # max vendors to show
 
