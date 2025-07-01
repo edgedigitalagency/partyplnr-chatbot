@@ -1,5 +1,5 @@
-flask
-openai
-python-dotenv
-pandas
-gunicorn
+flask==3.1.1
+openai==1.93.0
+python-dotenv==1.1.1
+pandas==2.3.0
+gunicorn==23.0.0
