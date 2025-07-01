@@ -1,54 +1,70 @@
-
-from flask import Flask, request, render_template
+import os
 import pandas as pd
 import openai
-import os
+from flask import Flask, request, jsonify, render_template
 
-app = Flask(__name__)
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# --- Config ---
+openai.api_key = os.getenv("OPENAI_API_KEY")          # set in .env or Render secret
+CSV_PATH = os.getenv("VENDORS_CSV_PATH", "VNDRs.csv") # override if you move the CSV
 
-# Load vendor data
-vendors = pd.read_csv("VNDRs.csv")
+# --- Load vendor database once at startup ---
+df = pd.read_csv(CSV_PATH).fillna("")
 
-# Normalize for easier matching
-vendors['Title'] = vendors['Title'].fillna("").str.lower()
-vendors['Category'] = vendors['Category'].fillna("").str.lower()
-vendors['Location'] = vendors['Location'].fillna("")
+def _format_vendor(row: pd.Series) -> str:
+    """Nicely format a single vendor row for chat output."""
+    parts = [
+        f"**{row.get('Title','Unknown Vendor')}**",
+        f"Category  : {row.get('Category','')}",
+        f"Offers    : {row.get('Offers','')}",
+        f"Location  : {row.get('Location','')}",
+        f"Contact   : {row.get('Contact Info','') or row.get('Phone Number','')}",
+        f"Link      : {row.get('link ','')}",
+    ]
+    return "\n".join([p for p in parts if p.strip()])
 
-def find_vendor(message):
-    message = message.lower()
-    matching_vendors = []
+def local_lookup(message: str) -> str | None:
+    """Quick pass through the CSV; return formatted vendor if we find a match."""
+    msg = message.lower()
+    for _, row in df.iterrows():
+        title    = str(row.get("Title",    "")).lower()
+        category = str(row.get("Category", "")).lower()
+        if title and title in msg:
+            return _format_vendor(row)
+        if category and category in msg:
+            return _format_vendor(row)
+    return None
 
-    for _, row in vendors.iterrows():
-        if row['Category'] in message or row['Title'] in message:
-            matching_vendors.append({
-                'name': row['Title'].title(),
-                'category': row['Category'].title(),
-                'location': row['Location'],
-                'contact': row['Contact Info'] or "No contact listed"
-            })
+SYSTEM_PROMPT = """
+You are PartyPlnr, a helpful assistant that suggests event vendors from a database.
+When no match exists, politely say you couldn't find one and encourage the user to try
+another query. Never invent vendor details that are not in the CSV.
+"""
 
-    if matching_vendors:
-        reply = "Here are some vendors that might work for you:\n\n"
-        for v in matching_vendors[:5]:
-            reply += f"- {v['name']} ({v['category']}) – {v['location']} – {v['contact']}\n"
-    else:
-        reply = "I couldn’t find an exact match in your area, but I’ll show you the closest options available.\n\n"
-        for _, row in vendors.head(3).iterrows():
-            reply += f"- {row['Title'].title()} ({row['Category'].title()}) – {row['Location']} – {row['Contact Info']}\n"
+def ai_fallback(message: str) -> str:
+    """Ask GPT-4o-mini for help when the CSV had no matches."""
+    completion = openai.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user",   "content": message}
+        ],
+        max_tokens=200,
+    )
+    return completion.choices[0].message.content.strip()
 
-    reply += "\n*Note: These are suggestions, not official quotes. Vendor details may vary.*"
-    return reply
+# --- Flask ---
+app = Flask(__name__, template_folder="templates", static_folder="static")
 
-@app.route("/", methods=["GET"])
-def index():
+@app.route("/")
+def home():
     return render_template("index.html")
 
 @app.route("/chat", methods=["POST"])
 def chat():
-    user_input = request.form["user_input"]
-    response = find_vendor(user_input)
-    return response
+    user_msg = request.get_json(force=True).get("message", "")
+    answer = local_lookup(user_msg) or ai_fallback(user_msg)
+    return jsonify({"response": answer})
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    # local dev → python app.py
+    app.run(host="0.0.0.0", port=10000, debug=True)
