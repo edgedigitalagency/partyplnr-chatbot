@@ -11,11 +11,11 @@ CSV_PATH       = os.getenv("VENDORS_CSV_PATH", "VNDRs.csv")
 
 df = pd.read_csv(CSV_PATH).fillna("")
 
-# Build a set of city­ names found in the CSV
+# set of city names known in the CSV  ──────────────────────────────────
 def _build_city_set() -> set[str]:
     city_set: set[str] = set()
     for loc in df["Location"].dropna():
-        first = str(loc).split(",")[0]         # “Alvin” from “Alvin, TX”
+        first = str(loc).split(",")[0]
         for part in re.split(r"[;/&]| and ", first):
             city = part.strip().lower()
             if city:
@@ -23,6 +23,47 @@ def _build_city_set() -> set[str]:
     return city_set
 
 CITIES = _build_city_set()
+
+# simple keyword ➜ CSV category map  ───────────────────────────────────
+KEYWORD_TO_CATEGORY = {
+    #   keyword (lower-case)    :  CSV “Category” value
+    "venue":        "Venue",
+    "hall":         "Venue",
+    "location":     "Venue",
+    "place":        "Venue",
+
+    "balloon":      "Balloons",
+    "balloons":     "Balloons",
+
+    "cake":         "Bakery",
+    "cakes":        "Bakery",
+    "bakery":       "Bakery",
+    "cupcake":      "Bakery",
+
+    "dessert":      "Bakery",
+    "treat":        "Bakery",
+
+    "dj":           "Entertainment ",
+    "music":        "Entertainment ",
+    "band":         "Entertainment ",
+
+    "photo":        "Photography",
+    "photographer": "Photography",
+    "photography":  "Photography",
+
+    "decor":        "Event Decorators",
+    "decoration":   "Event Decorators",
+    "decorator":    "Event Decorators",
+
+    "cater":        "Food Vendors",
+    "catering":     "Food Vendors",
+    "chef":         "Food Vendors",
+    "food":         "Food Vendors",
+
+    "bar":          "Mobile Bars",
+    "drink":        "Mobile Bars",
+    "cocktail":     "Mobile Bars",
+}
 
 # ── Helpers ───────────────────────────────────────────────────────────
 def _similar(a: str, b: str) -> float:
@@ -41,51 +82,50 @@ def _format_vendor(row: pd.Series) -> str:
     )
 
 def _find_cities(msg: str) -> list[str]:
-    """Return any known city names mentioned in the message."""
     msg_lc = msg.lower()
     return [city for city in CITIES if re.search(rf"\b{re.escape(city)}\b", msg_lc)]
 
+def _requested_categories(msg: str) -> list[str]:
+    """Return list of CSV categories inferred from keywords in the message."""
+    msg_lc = msg.lower()
+
+    # special preset for “baby shower”
+    if "baby shower" in msg_lc:
+        return ["Venue", "Balloons", "Bakery"]
+
+    cats: list[str] = []
+    for kw, cat in KEYWORD_TO_CATEGORY.items():
+        if re.search(rf"\b{re.escape(kw)}\b", msg_lc):
+            cats.append(cat)
+    return list(dict.fromkeys(cats))   # keep order, remove dupes
+
 # ── Local vendor lookup ───────────────────────────────────────────────
 def local_lookup(message: str) -> str | None:
-    msg      = message.lower()
-    cities   = _find_cities(msg)
-    seen_cat = set()
-    results  = []
+    msg       = message.lower()
+    cities    = _find_cities(msg)
+    req_cats  = _requested_categories(msg)
 
-    for _, row in df.iterrows():
-        title = str(row.get("Title", "")).lower()
-        cat   = str(row.get("Category", "")).strip().lower()
-        loc   = str(row.get("Location", "")).lower()
+    if not req_cats:
+        return None   # no idea what category they want → caller will ask
 
-        # Skip vendors outside the requested city
-        if cities and not any(city in loc for city in cities):
-            continue
-
-        def matches() -> bool:
-            if (cat and cat in msg) or (title and title in msg):
-                return True
-            for word in re.findall(r"\w+", msg):
-                if _similar(word, cat) >= 0.7 or _similar(word, title) >= 0.7:
-                    return True
-            return False
-
-        if matches() and cat not in seen_cat:
+    results: list[pd.Series] = []
+    for cat in req_cats:
+        # pick first vendor that matches both city & category
+        for _, row in df[df["Category"].str.lower() == cat.lower()].iterrows():
+            loc_lc = str(row.get("Location", "")).lower()
+            if cities and not any(city in loc_lc for city in cities):
+                continue
             results.append(row)
-            seen_cat.add(cat)
-        if len(results) >= 5:
-            break
+            break  # only one vendor per requested category
 
     if not results:
         return None
 
-    if len(results) == 1:
-        cat  = results[0].get("Category", "vendor").lower()
-        city = results[0].get("Location", "").split(",")[0]
-        intro = (f"Great! It sounds like you’re looking for a {cat}"
-                 f"{' in ' + city if city else ''}. 🎉\n\n"
-                 "Here’s someone on our list who might fit:\n\n")
-    else:
-        intro = "Here are a few vendors that may help with your request:\n\n"
+    intro_city = f" in {cities[0].title()}" if cities else ""
+    intro = (f"Great! Here are some options{intro_city}:\n\n"
+             if len(results) > 1 else
+             f"Great! It sounds like you’re planning something{intro_city}. 🎉\n\n"
+             "Here’s someone on our list who might fit:\n\n")
 
     body = "\n\n---\n\n".join(_format_vendor(r) for r in results)
     return intro + body
@@ -93,14 +133,15 @@ def local_lookup(message: str) -> str | None:
 # ── GPT-4o-mini fallback ──────────────────────────────────────────────
 SYSTEM_PROMPT = """
 You are PartyPlnr, an assistant that suggests event vendors from a database.
-If the CSV has no match for the requested city, politely say you couldn't find one
-and invite the user to try again with different wording. Never invent vendor data.
+If the CSV has no match for the requested city or services, politely say you couldn't
+find one and invite the user to try again with different wording. Never invent vendor
+data or pretend to have vendors that are not in the CSV.
 """
 
 def ai_fallback(message: str) -> str:
     if not openai.api_key:
-        return ("I couldn’t reach the AI right now. "
-                "Please try a different keyword or city.")
+        return ("I couldn’t find a match. Try different keywords "
+                "like 'venue', 'balloons', or 'cake', plus the city name.")
     try:
         resp = openai.chat.completions.create(
             model="gpt-4o-mini",
@@ -123,17 +164,24 @@ def home():
 
 @app.route("/chat", methods=["POST"])
 def chat():
-    user_msg   = request.get_json(force=True).get("message", "")
-    cities_in_msg = _find_cities(user_msg)
+    user_msg = request.get_json(force=True).get("message", "")
+    cities   = _find_cities(user_msg)
+    cats     = _requested_categories(user_msg)
 
     answer = local_lookup(user_msg)
-    if answer:                              # we found vendors
+    if answer:
         return jsonify({"response": answer})
 
-    if not cities_in_msg:                   # no city specified → ask
+    # no category keywords ➜ ask what services
+    if not cats:
+        return jsonify({"response":
+            "Got it! What services do you need? (e.g. venue, cake, balloons, DJ)"} )
+
+    # category present but no city ➜ ask city
+    if not cities:
         return jsonify({"response": "Sure — what city will the event be in?"})
 
-    # city given but no vendor match → ask GPT (or apologise)
+    # we had city & services but still no vendor ➜ GPT or apology
     return jsonify({"response": ai_fallback(user_msg)})
 
 # ── Local dev ─────────────────────────────────────────────────────────
